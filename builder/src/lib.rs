@@ -88,6 +88,50 @@ fn generate_setter_functions(st: &syn::DeriveInput) -> syn::Result<proc_macro2::
     Ok(final_tokenstream)
 }
 
+fn generate_build_function(st: &syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let fields = get_fields_from_derive_input(st)?;
+    let mut checker_code_pieces = Vec::new();
+    for field in fields {
+        let ident = &field.ident;
+        checker_code_pieces.push(quote! {
+            if self.#ident.is_none() {
+                let err = format!("{} field is missing",stringify!(#ident));
+                return std::result::Result::Err(err.into());
+            }
+        });
+    }
+
+    let mut fill_result_clauses = Vec::new();
+    for field in fields {
+        let ident = &field.ident;
+        fill_result_clauses.push(quote! {
+            #ident:self.#ident.clone().unwrap()
+        });
+    }
+
+    let struct_name_ident = &st.ident;
+    let token_stream = quote! {
+        pub fn build(&mut self) -> std::result::Result<#struct_name_ident,std::boxed::Box<dyn std::error::Error>>{
+            #(#checker_code_pieces)*
+
+            let ret = #struct_name_ident {
+                #(#fill_result_clauses,)*
+            };
+
+            // let ret = Command{
+            //     executable: String::new(),
+            //     args: vec![String::new()],
+            //     env: vec![String::new()],
+            //     current_dir: String::new(),
+            // }
+
+            return std::result::Result::Ok(ret);
+        }
+    };
+
+    Ok(token_stream)
+}
+
 fn do_expand(st: &syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     // 获取到结构体的名字 ident;
     let struct_name_ident = st.ident.clone();
@@ -97,16 +141,24 @@ fn do_expand(st: &syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let builder_name = format!("{struct_name_literal}Builder");
     // 创建 builder 结构体名字的 ident，new的第二个参数是 span，用于定位新增的代码是在哪个位置
     // 方便之后报错定位错误，这里使用 st.span() ,报错时就会直接提示是修饰的结构的的位置的错误
+    // 如果代码比较复杂，可以在根目录下运行cargo expand将生成结果复制到编辑器获取play.rust-lang.org中再查看错误
     let builder_name_ident = syn::Ident::new(&builder_name, st.span());
 
     let builder_struct_fields_def = generate_builder_struct_fields_def(st)?;
     let builder_struct_factory_init_clauses = generate_builder_struct_factory_init_clauses(st)?;
     let setter_functions = generate_setter_functions(st)?;
+    let build_function = generate_build_function(st)?;
 
     // 使用 quote! 插入并生成新的 proc_macro2::TokenStream
     let ret = quote! {
         pub struct #builder_name_ident {
             #builder_struct_fields_def
+        }
+
+        impl #builder_name_ident{
+            #setter_functions
+
+            #build_function
         }
 
         impl #struct_name_ident {
@@ -117,9 +169,6 @@ fn do_expand(st: &syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             }
         }
 
-        impl #builder_name_ident{
-            #setter_functions
-        }
     };
 
     Ok(ret)
