@@ -65,6 +65,29 @@ fn generate_builder_struct_factory_init_clauses(
 
     Ok(init_clauses)
 }
+
+fn generate_setter_functions(st: &syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let fields = get_fields_from_derive_input(st)?;
+
+    let idents: Vec<_> = fields.iter().map(|f| &f.ident).collect();
+    let types: Vec<_> = fields.iter().map(|f| &f.ty).collect();
+
+    let mut final_tokenstream = proc_macro2::TokenStream::new();
+
+    for (ident, type_) in idents.iter().zip(types.iter()) {
+        let tokenstream_piece = quote! {
+            fn #ident(&mut self,#ident:#type_) -> &mut Self{
+                self.#ident = std::option::Option::Some(#ident);
+                self
+            }
+        };
+
+        final_tokenstream.extend(tokenstream_piece);
+    }
+
+    Ok(final_tokenstream)
+}
+
 fn do_expand(st: &syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     // 获取到结构体的名字 ident;
     let struct_name_ident = st.ident.clone();
@@ -78,6 +101,7 @@ fn do_expand(st: &syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
 
     let builder_struct_fields_def = generate_builder_struct_fields_def(st)?;
     let builder_struct_factory_init_clauses = generate_builder_struct_factory_init_clauses(st)?;
+    let setter_functions = generate_setter_functions(st)?;
 
     // 使用 quote! 插入并生成新的 proc_macro2::TokenStream
     let ret = quote! {
@@ -91,6 +115,10 @@ fn do_expand(st: &syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                     #(#builder_struct_factory_init_clauses),*
                 }
             }
+        }
+
+        impl #builder_name_ident{
+            #setter_functions
         }
     };
 
