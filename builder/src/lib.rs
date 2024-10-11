@@ -35,28 +35,30 @@ fn generate_builder_struct_fields_def(
     let fields = get_fields_from_derive_input(st)?;
 
     let fields_ident = fields.iter().map(|f| &f.ident);
-    let fields_type = fields.iter().map(|f| {
+    let fields_type:syn::Result<Vec<_>> = fields.iter().map(|f| {
         if let Some(inner_type) = get_generic_inner_type(&f.ty, "Option") {
-            quote! {
+            Ok(quote! {
                 std::option::Option<#inner_type>
-            }
-        } else if get_user_specified_ident_for_vec(&f).is_some() {
+            })
+        } else if get_user_specified_ident_for_vec(&f)?.is_some() {
             let origin_type = &f.ty;
-            quote! {
+            Ok(quote! {
                 #origin_type
-            }
+            })
         } else {
             let origin_type = &f.ty;
-            quote! {
+            Ok(quote! {
                 std::option::Option<#origin_type>
-            }
+            })
         }
-    });
+    }).collect();
+
+    let types = fields_type?;
 
     // 在生成类型的时候要使用绝对路径避免与当前定义的类型冲突
     // #(重复的内容必须是实现了迭代器的数据)*
     let ret: proc_macro2::TokenStream = quote! {
-        #(#fields_ident:#fields_type),*
+        #(#fields_ident:#types),*
     };
 
     Ok(ret.into())
@@ -69,23 +71,26 @@ fn generate_builder_struct_factory_init_clauses(
 
     let fields = get_fields_from_derive_input(st)?;
 
-    let init_clauses = fields
+    let init_clauses:syn::Result<Vec<_>> = fields
         .iter()
         .map(|f| {
             let ident = &f.ident;
-            if get_user_specified_ident_for_vec(&f).is_some() {
-                quote! {
+            // 这里为什么加个 ? 就要把其他的返回都加上 Ok 包裹？
+            // 因为当 get_user_specified_ident_for_vec 报错是就会抛出错误，而错误类型是 Result,
+            // map 接收到的返回数据类型就有两种：TokenStream 和 Result，从而出现类型冲突，所以要进行统一化处理
+            if get_user_specified_ident_for_vec(&f)?.is_some() {
+                Ok(quote! {
                     #ident: std::vec::Vec::new()
-                }
+                })
             } else {
-                quote! {
+                Ok(quote! {
                     #ident: std::option::Option::None
-                }
+                })
             }
         })
         .collect();
 
-    Ok(init_clauses)
+    Ok(init_clauses?)
 }
 
 fn generate_setter_functions(st: &syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
@@ -103,7 +108,7 @@ fn generate_setter_functions(st: &syn::DeriveInput) -> syn::Result<proc_macro2::
                     self
                 }
             }
-        } else if let Some(ref user_specified_ident) = get_user_specified_ident_for_vec(field) {
+        } else if let Some(ref user_specified_ident) = get_user_specified_ident_for_vec(field)? {
             let inner_type = get_generic_inner_type(&field.ty, "Vec").ok_or(syn::Error::new(
                 field.span(),
                 "each field must be specified with Vec field",
@@ -146,7 +151,7 @@ fn generate_build_function(st: &syn::DeriveInput) -> syn::Result<proc_macro2::To
         let ident = &field.ident;
         let type_ = &field.ty;
         // 只对不是`Option`类型且没有指定each属性的字段生成校验逻辑
-        if get_generic_inner_type(type_, "Option").is_none() && get_user_specified_ident_for_vec(field).is_none() {
+        if get_generic_inner_type(type_, "Option").is_none() && get_user_specified_ident_for_vec(field)?.is_none() {
             checker_code_pieces.push(quote! {
                 if self.#ident.is_none() {
                     let err = format!("{} field is missing",stringify!(#ident));
@@ -161,7 +166,7 @@ fn generate_build_function(st: &syn::DeriveInput) -> syn::Result<proc_macro2::To
         let ident = &field.ident;
         let type_ = &field.ty;
         // 需要先判断是有自定 each ，再判断是否是 Option，因为 Option比 each 范围更广
-        if get_user_specified_ident_for_vec(field).is_some() {
+        if get_user_specified_ident_for_vec(field)?.is_some() {
             fill_result_clauses.push(quote! {
                 #ident:self.#ident.clone()
             });
@@ -220,7 +225,7 @@ fn get_generic_inner_type<'a>(
     return None;
 }
 
-fn get_user_specified_ident_for_vec(field: &syn::Field) -> Option<syn::Ident> {
+fn get_user_specified_ident_for_vec(field: &syn::Field) -> syn::Result<Option<syn::Ident>> {
     for attr in &field.attrs {
         if attr.path().is_ident("builder") {
             let mut ident = None;
@@ -229,15 +234,19 @@ fn get_user_specified_ident_for_vec(field: &syn::Field) -> Option<syn::Ident> {
                     let value = meta.value()?;
                     let s: LitStr = value.parse()?;
                     ident = Some(syn::Ident::new(s.value().as_str(), attr.span()));
-                    Ok(())
+                    ()
                 } else {
-                    Err(meta.error("unsupported attribute"))
+                    if let syn::Meta::List(ref list) = attr.meta {
+                        eprintln!("metalist,{list:#?}");
+                        return Err(syn::Error::new_spanned(list, r#"expected `builder(each = "...")`"#));
+                    }
                 }
+                Ok(())
             });
-            return ident;
+            return Ok(ident);
         }
     }
-    None
+    Ok(None)
 }
 
 fn do_expand(st: &syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
