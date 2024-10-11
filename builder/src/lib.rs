@@ -1,9 +1,9 @@
 use proc_macro::TokenStream;
 use proc_macro2;
 use quote::quote;
-use syn::{self, spanned::Spanned};
+use syn::{self, spanned::Spanned, LitStr};
 
-#[proc_macro_derive(Builder)]
+#[proc_macro_derive(Builder,attributes(builder))]
 pub fn derive(input: TokenStream) -> TokenStream {
     let _ = input;
     let st = syn::parse_macro_input!(input as syn::DeriveInput);
@@ -36,9 +36,14 @@ fn generate_builder_struct_fields_def(
 
     let fields_ident = fields.iter().map(|f| &f.ident);
     let fields_type = fields.iter().map(|f| {
-        if let Some(inner_type) = get_optional_inner_type(&f.ty) {
+        if let Some(inner_type) = get_generic_inner_type(&f.ty, "Option") {
             quote! {
                 std::option::Option<#inner_type>
+            }
+        } else if get_user_specified_ident_for_vec(&f).is_some() {
+            let origin_type = &f.ty;
+            quote! {
+                #origin_type
             }
         } else {
             let origin_type = &f.ty;
@@ -68,8 +73,14 @@ fn generate_builder_struct_factory_init_clauses(
         .iter()
         .map(|f| {
             let ident = &f.ident;
-            quote! {
-                #ident: std::option::Option::None
+            if get_user_specified_ident_for_vec(&f).is_some() {
+                quote! {
+                    #ident: std::vec::Vec::new()
+                }
+            } else {
+                quote! {
+                    #ident: std::option::Option::None
+                }
             }
         })
         .collect();
@@ -80,19 +91,39 @@ fn generate_builder_struct_factory_init_clauses(
 fn generate_setter_functions(st: &syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let fields = get_fields_from_derive_input(st)?;
 
-    let idents: Vec<_> = fields.iter().map(|f| &f.ident).collect();
-    let types: Vec<_> = fields.iter().map(|f| &f.ty).collect();
-
     let mut final_tokenstream = proc_macro2::TokenStream::new();
 
-    for (ident, type_) in idents.iter().zip(types.iter()) {
-        let tokenstream_piece = if let Some(inner_type) = get_optional_inner_type(type_) {
+    for field in fields {
+        let ident = &field.ident;
+        let type_ = &field.ty;
+        let tokenstream_piece = if let Some(inner_type) = get_generic_inner_type(type_, "Option") {
             quote! {
                 fn #ident(&mut self,#ident:#inner_type) -> &mut Self{
                     self.#ident = std::option::Option::Some(#ident);
                     self
                 }
             }
+        } else if let Some(ref user_specified_ident) = get_user_specified_ident_for_vec(field) {
+            let inner_type = get_generic_inner_type(&field.ty, "Vec").ok_or(syn::Error::new(
+                field.span(),
+                "each field must be specified with Vec field",
+            ))?;
+            let mut tokenstream = proc_macro2::TokenStream::new();
+            tokenstream.extend(quote! {
+                fn #user_specified_ident(&mut self,#user_specified_ident:#inner_type) -> &mut Self{
+                    self.#ident.push(#user_specified_ident);
+                    self
+                }
+            });
+            if user_specified_ident != ident.as_ref().unwrap() {
+                tokenstream.extend(quote! {
+                    fn #ident(&mut self,#ident:#type_) -> &mut Self{
+                        self.#ident = #ident.clone();
+                        self
+                    }
+                });
+            }
+            tokenstream
         } else {
             quote! {
                 fn #ident(&mut self,#ident:#type_) -> &mut Self{
@@ -114,7 +145,8 @@ fn generate_build_function(st: &syn::DeriveInput) -> syn::Result<proc_macro2::To
     for field in fields {
         let ident = &field.ident;
         let type_ = &field.ty;
-        if get_optional_inner_type(type_).is_none() {
+        // 只对不是`Option`类型且没有指定each属性的字段生成校验逻辑
+        if get_generic_inner_type(type_, "Option").is_none() && get_user_specified_ident_for_vec(field).is_none() {
             checker_code_pieces.push(quote! {
                 if self.#ident.is_none() {
                     let err = format!("{} field is missing",stringify!(#ident));
@@ -128,7 +160,12 @@ fn generate_build_function(st: &syn::DeriveInput) -> syn::Result<proc_macro2::To
     for field in fields {
         let ident = &field.ident;
         let type_ = &field.ty;
-        if get_optional_inner_type(type_).is_none() {
+        // 需要先判断是有自定 each ，再判断是否是 Option，因为 Option比 each 范围更广
+        if get_user_specified_ident_for_vec(field).is_some() {
+            fill_result_clauses.push(quote! {
+                #ident:self.#ident.clone()
+            });
+        } else if get_generic_inner_type(type_, "Option").is_none() {
             fill_result_clauses.push(quote! {
                 #ident:self.#ident.clone().unwrap()
             });
@@ -155,7 +192,10 @@ fn generate_build_function(st: &syn::DeriveInput) -> syn::Result<proc_macro2::To
     Ok(token_stream)
 }
 
-fn get_optional_inner_type(t: &syn::Type) -> Option<&syn::Type> {
+fn get_generic_inner_type<'a>(
+    t: &'a syn::Type,
+    outer_ident_name: &'a str,
+) -> Option<&'a syn::Type> {
     if let syn::Type::Path(syn::TypePath {
         path: syn::Path { segments, .. },
         ..
@@ -163,7 +203,7 @@ fn get_optional_inner_type(t: &syn::Type) -> Option<&syn::Type> {
     {
         // 有可能是是多种写法的 Option<T>,std::option::Option<T>,所以要去最后一项
         if let Some(seg) = segments.last() {
-            if seg.ident == "Option" {
+            if seg.ident == outer_ident_name {
                 if let syn::PathArguments::AngleBracketed(syn::AngleBracketedGenericArguments {
                     args,
                     ..
@@ -178,6 +218,26 @@ fn get_optional_inner_type(t: &syn::Type) -> Option<&syn::Type> {
         }
     }
     return None;
+}
+
+fn get_user_specified_ident_for_vec(field: &syn::Field) -> Option<syn::Ident> {
+    for attr in &field.attrs {
+        if attr.path().is_ident("builder") {
+            let mut ident = None;
+            let _ret = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("each") {
+                    let value = meta.value()?;
+                    let s: LitStr = value.parse()?;
+                    ident = Some(syn::Ident::new(s.value().as_str(), attr.span()));
+                    Ok(())
+                } else {
+                    Err(meta.error("unsupported attribute"))
+                }
+            });
+            return ident;
+        }
+    }
+    None
 }
 
 fn do_expand(st: &syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
