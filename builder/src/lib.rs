@@ -229,7 +229,8 @@ fn get_user_specified_ident_for_vec(field: &syn::Field) -> syn::Result<Option<sy
     for attr in &field.attrs {
         if attr.path().is_ident("builder") {
             let mut ident = None;
-            let _ret = attr.parse_nested_meta(|meta| {
+            // 旧版本sys 的 parse_meta 方法的结果现在在 attr_meta 中
+            let ret = attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("each") {
                     let value = meta.value()?;
                     let s: LitStr = value.parse()?;
@@ -243,6 +244,9 @@ fn get_user_specified_ident_for_vec(field: &syn::Field) -> syn::Result<Option<sy
                 }
                 Ok(())
             });
+            if let Err(err) = ret {
+                return Err(err);
+            }
             return Ok(ident);
         }
     }
