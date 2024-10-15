@@ -3,6 +3,7 @@ use proc_macro2;
 use quote::quote;
 use syn::{self, spanned::Spanned, LitStr};
 
+// attributes 可以注册多个惰性属性
 #[proc_macro_derive(Builder,attributes(builder))]
 pub fn derive(input: TokenStream) -> TokenStream {
     let _ = input;
