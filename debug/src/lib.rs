@@ -56,11 +56,29 @@ fn generate_debug_trait(st:&syn::DeriveInput) -> syn::Result<proc_macro2::TokenS
     let struct_name_ident = &st.ident;
 
     let fmt_body_stream = generate_debug_fmt_body(st)?;
+
+    let fields = get_fields_from_derive_input(st)?;
+    let mut field_type_names:Vec<String> = Vec::new();
+    let mut phantomdata_type_param_names:Vec<String> = Vec::new();
+    for field in fields {
+        if let Some(s) = get_field_type_name(field)? {
+            field_type_names.push(s);
+        }
+        if let Some(s) = get_phantomdata_generic_type_name(field)?{
+            phantomdata_type_param_names.push(s);
+        }
+    }
     
     // 取出范型定义，然后为每个范型追加 Debug 约束，之后重新插入到语法树中
     let mut generic_param_to_modify = st.generics.clone();
     for g in generic_param_to_modify.params.iter_mut() {
         if let syn::GenericParam::Type(t) = g{
+            let type_param_name = t.ident.to_string();
+            // 如果是PhantomData，就不要对泛型参数`T`本身再添加约束了,除非`T`本身也被直接使用了
+            if phantomdata_type_param_names.contains(&type_param_name) && !field_type_names.contains(&type_param_name) {
+                continue;
+            }
+
             // parse_quote! 将数据解析为语法树节点
             t.bounds.push(parse_quote!(std::fmt::Debug));
         }
@@ -94,6 +112,32 @@ fn get_custom_format_of_fields(field:&syn::Field) -> syn::Result<Option<String>>
         }
     }
     Ok(None)
+}
+
+fn get_field_type_name(field:&syn::Field) -> syn::Result<Option<String>> {
+    if let syn::Type::Path(syn::TypePath{path: syn::Path{ref segments, ..}, ..}) = field.ty {
+        if let Some(syn::PathSegment{ref ident,..}) = segments.last() {
+            return Ok(Some(ident.to_string()))
+        }
+    }
+    return Ok(None)
+}
+
+fn get_phantomdata_generic_type_name(field:&syn::Field) -> syn::Result<Option<String>>{
+    if let syn::Type::Path(syn::TypePath{path: syn::Path{ref segments, ..}, ..}) = field.ty {
+        if let Some(syn::PathSegment{ref ident, ref arguments}) = segments.last() {
+            if ident == "PhantomData" {
+                if let syn::PathArguments::AngleBracketed(syn::AngleBracketedGenericArguments{args, ..}) = arguments {
+                    if let Some(syn::GenericArgument::Type(syn::Type::Path( ref gp))) = args.first() {
+                        if let Some(generic_ident) = gp.path.segments.first() {
+                            return Ok(Some(generic_ident.ident.to_string()))
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return Ok(None)
 }
 
 fn do_expand(st:&syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
