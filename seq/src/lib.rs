@@ -5,8 +5,18 @@ use syn::parse_macro_input;
 pub fn seq(input: TokenStream) -> TokenStream {
     let st = parse_macro_input!(input as SeqParser);
 
-    // 下面5行是第三关新加入的
     let mut ret = proc_macro2::TokenStream::new();
+
+    // 从TokenStream创建TokenBuffer
+    let buffer = syn::buffer::TokenBuffer::new2(st.body.clone());
+
+    // 首先尝试寻找`#(xxxxxxxxx)*`模式的代码块
+    let(ret_1, expanded) =  st.find_block_to_expand_and_do_expand(buffer.begin());
+    if expanded {
+        return ret_1.into()
+    }
+
+    // 走到这里，说明`#(xxxxxxxxx)*`这个模式没有匹配到，那么重新使用上一关的方式，在整个代码块中尝试展开
     for i in st.start..st.end {
         ret.extend(st.expand(&st.body, i))
     }
@@ -124,5 +134,88 @@ impl SeqParser {
             idx+=1;
         }
         ret
+    }
+
+    fn find_block_to_expand_and_do_expand(&self, c: syn::buffer::Cursor) -> (proc_macro2::TokenStream, bool) {
+        let mut found = false;
+        let mut ret = proc_macro2::TokenStream::new();
+
+        let mut cursor = c;
+        while !cursor.eof() {
+            // 注意punct()这个函数的返回值，它会返回一个新的`Cursor`类型的值，
+            // 这个新的Cursor指向了消耗掉当前标点符号以后，在TokenBuffer中的下一个位置
+            // syn包提供的Cursor机制，并不是拿到一个Cursor以后，不断向后移动更新这个Cursor，
+            // 而是每次都会返回给你一个全新的Cursor，新的Cursor指向新的位置，
+            // 老的Cursor指向的位置保持不变
+            if let Some((punct_prefix, cursor_1)) = cursor.punct(){
+                if punct_prefix.as_char() == '#' {
+                    if let Some((group_cur,_,cursor_2)) = cursor_1.group(proc_macro2::Delimiter::Parenthesis) {
+                        if let Some((punct_suffix, cursor_3)) = cursor_2.punct() {
+                            if punct_suffix.as_char() == '*' {
+                                // 走到这里，说明找到了匹配的模式，按照指定的次数开始展开
+                                for i in self.start..self.end {
+                                    // 因为之前expand是用TokenStream这一套写的，所以
+                                    // 这里还要把Cursor转换为TokenStream。毕竟是演示嘛，
+                                    // 希望在最少的代码里用到最多的特性，如果是自己写的话，
+                                    // 可以用Cursor的方式来写expand函数，这样这里就可以
+                                    // 直接把Cursor传进去了
+                                    let t = self.expand(&group_cur.token_stream(), i);
+                                    ret.extend(t);
+                                }
+                                // 下面这行很重要，千万别忘了，把老的cursor丢了，替换成
+                                // 新的，相当于把游标向前移动了
+                                cursor = cursor_3;
+                                found = true;
+                                continue
+                            }
+                        }
+                    }
+                }
+            }
+            // 走到这里，说明`#(xxxxxxxxx)*`这个模式没有匹配到，那么就要按照普通代码的各个元素来处理了。
+
+            // cursor也有用起来不方便的地方，比如在处理group的时候，我们没法统一处理()\[]\{}，需要把他们分别处理
+            // 有一种暴力的做法，就是cursor提供了token_tree()方法，可以把当前游标指向的内容作为一个TokenTree返回，
+            // 我们再去断言TokenTree是Group、Indet、Literal、Punct中的哪一种，这就相当于回到了上一关介绍的方法，
+            // 回到了`proc_macro2`包提供的工具上去。
+            // 所以我们这里本着尽量采用不重复的方式来讲解的原则，继续使用`cursor`提供的各种工具来完成本关题目
+            if let Some((group_cur,_, next_cur)) = cursor.group(proc_macro2::Delimiter::Brace) {
+                let (t, f) = self.find_block_to_expand_and_do_expand(group_cur);
+                found = f;
+                ret.extend(quote::quote!({#t}));
+                cursor = next_cur;
+                continue
+            } else if let Some((group_cur,_, next_cur)) = cursor.group(proc_macro2::Delimiter::Bracket) {
+                let (t, f) = self.find_block_to_expand_and_do_expand(group_cur);
+                found = f;
+                ret.extend(quote::quote!([#t]));
+                cursor = next_cur;
+                continue
+            } else if let Some((group_cur,_, next_cur)) = cursor.group(proc_macro2::Delimiter::Parenthesis) {
+                let (t, f) = self.find_block_to_expand_and_do_expand(group_cur);
+                found = f;
+                ret.extend(quote::quote!((#t)));
+                cursor = next_cur;
+                continue
+            } else if let Some((punct ,next_cur)) = cursor.punct() {
+                ret.extend(quote::quote!(#punct));
+                cursor = next_cur;
+                continue
+            } else if let Some((ident ,next_cur)) = cursor.ident() {
+                ret.extend(quote::quote!(#ident));
+                cursor = next_cur;
+                continue
+            } else if let Some((literal ,next_cur)) = cursor.literal() {
+                ret.extend(quote::quote!(#literal));
+                cursor = next_cur;
+                continue
+            } else if let Some((lifetime ,next_cur)) = cursor.lifetime() {
+                // lifetime这种特殊的分类也是用cursor模式来处理的时候特有的，之前`proc_macro2::TokenTree`里面没有定义这个分类
+                ret.extend(quote::quote!(#lifetime));
+                cursor = next_cur;
+                continue
+            }
+        }
+        (ret, found)
     }
 }
