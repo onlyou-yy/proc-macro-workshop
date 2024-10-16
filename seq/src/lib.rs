@@ -50,6 +50,12 @@ impl syn::parse::Parse for SeqParser {
         // 假定`ParseStream`当前游标对应的是一个写作`..`的自定义的Token
         input.parse::<syn::Token![..]>()?;
 
+        let mut inc = false;
+        if input.peek(syn::Token![=]) {
+            input.parse::<syn::Token![=]>()?;
+            inc = true;
+        }
+
         // 假定`ParseStream`当前游标对应的是一个可以解析为整形数字面量的Token，
         let end_lit:syn::LitInt = input.parse()?;
 
@@ -58,13 +64,17 @@ impl syn::parse::Parse for SeqParser {
         let body_buf;
         syn::braced!(body_buf in input);
         let body:proc_macro2::TokenStream = body_buf.parse()?;
-
-        let t = SeqParser{
+        
+        let mut t = SeqParser{
             variable_ident,
             start:start_lit.base10_parse()?,
             end:end_lit.base10_parse()?,
             body
         };
+
+        if inc {
+            t.end += 1;
+        }
 
         Ok(t)
     }
