@@ -1,6 +1,8 @@
+use std::collections::HashMap;
+
 use proc_macro::{TokenStream};
 use quote::quote;
-use syn::{parse_macro_input, parse_quote, DeriveInput};
+use syn::{parse_macro_input, parse_quote, visit::{self, Visit}, DeriveInput};
 
 #[proc_macro_derive(CustomDebug,attributes(debug))]
 pub fn derive(input: TokenStream) -> TokenStream {
@@ -69,6 +71,8 @@ fn generate_debug_trait(st:&syn::DeriveInput) -> syn::Result<proc_macro2::TokenS
         }
     }
     
+    //找到关联类型信息
+    let associated_types_map = get_generic_associated_types(st);
     // 取出范型定义，然后为每个范型追加 Debug 约束，之后重新插入到语法树中
     let mut generic_param_to_modify = st.generics.clone();
     for g in generic_param_to_modify.params.iter_mut() {
@@ -79,8 +83,21 @@ fn generate_debug_trait(st:&syn::DeriveInput) -> syn::Result<proc_macro2::TokenS
                 continue;
             }
 
+            // 如果是关联类型，就不要对泛型参数`T`本身再添加约束了,除非`T`本身也被直接使用了
+            if associated_types_map.contains_key(&type_param_name) && !field_type_names.contains(&type_param_name) {
+                continue;
+            }
+
             // parse_quote! 将数据解析为语法树节点
             t.bounds.push(parse_quote!(std::fmt::Debug));
+        }
+    }
+
+    // 关联类型的约束要放到where子句里
+    generic_param_to_modify.make_where_clause();
+    for (_, associated_types) in associated_types_map {
+        for associated_type in associated_types {
+            generic_param_to_modify.where_clause.as_mut().unwrap().predicates.push(parse_quote!(#associated_type:std::fmt::Debug));
         }
     }
 
@@ -140,7 +157,51 @@ fn get_phantomdata_generic_type_name(field:&syn::Field) -> syn::Result<Option<St
     return Ok(None)
 }
 
+fn get_generic_associated_types(st:&syn::DeriveInput) -> HashMap<String,Vec<syn::TypePath>> {
+    // 构建筛选条件
+    let origin_generic_param_names = st.generics.params.iter().filter_map(|f| {
+        if let syn::GenericParam::Type(ty) = f {
+            return  Some(ty.ident.to_string());
+        }
+        return None;
+    }).collect();
+
+    let mut visitor = TypePathVisitor {
+        generic_type_names:origin_generic_param_names,
+        associated_types:HashMap::new()
+    };
+
+    visitor.visit_derive_input(st);
+    return  visitor.associated_types;
+
+}
+
 fn do_expand(st:&syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let debug_trait_tokenstream = generate_debug_trait(st)?;
     return Ok(debug_trait_tokenstream);
+}
+
+
+// 使用 syn 的 visit 模式可以实现当遍历语法树到指定的节点的时候触发回调
+// 需要在 features 中开启 visit 才可以使用
+struct TypePathVisitor {
+    // 这个是筛选条件，里面记录了所有的泛型参数的名字，例如`T`,`U`等
+    generic_type_names:Vec<String>,
+    // 这里记录了所有满足条件的语法树节点
+    associated_types: HashMap<String, Vec<syn::TypePath>>,  
+}
+
+impl<'ast> Visit<'ast> for TypePathVisitor {
+    fn visit_type_path(&mut self, node: &'ast syn::TypePath) {
+        // 只对 T::Value1 这种类型进行处理
+        if node.path.segments.len() >= 2 {
+            let generic_type_name = node.path.segments[0].ident.to_string();
+            if self.generic_type_names.contains(&generic_type_name) {
+                self.associated_types.entry(generic_type_name).or_insert(Vec::new()).push(node.clone());
+            }
+        }
+        // Visit 模式要求在当前节点访问完成后，继续调用默认实现的visit方法，从而遍历到所有的
+        // 必须调用这个函数，否则遍历到这个节点就不再往更深层走了
+        visit::visit_type_path(self, node);
+    }
 }
