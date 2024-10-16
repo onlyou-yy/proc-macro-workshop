@@ -3,10 +3,15 @@ use syn::parse_macro_input;
 
 #[proc_macro]
 pub fn seq(input: TokenStream) -> TokenStream {
-    let _ = input;
     let st = parse_macro_input!(input as SeqParser);
 
-    return  proc_macro2::TokenStream::new().into();
+    // 下面5行是第三关新加入的
+    let mut ret = proc_macro2::TokenStream::new();
+    for i in st.start..st.end {
+        ret.extend(st.expand(&st.body, i))
+    }
+
+    return ret.into();
 }
 
 // 定义解析自己语法，首先需要定义自己的语法树节点
@@ -52,5 +57,48 @@ impl syn::parse::Parse for SeqParser {
         };
 
         Ok(t)
+    }
+}
+
+
+impl SeqParser {
+    fn expand(&self, ts: &proc_macro2::TokenStream, n: isize) -> proc_macro2::TokenStream {
+        let buf = ts.clone().into_iter().collect::<Vec<_>>();
+        let mut ret = proc_macro2::TokenStream::new();
+        
+        // 这里为了简单，使用了for循环，实际我想表达的意思是，
+        // 这个idx你可以随心所欲的控制，跳着访问，回溯已经访问过的节点等等，都可以
+        for idx in 0..buf.len() {
+            let tree_node = &buf[idx];
+            match tree_node {
+                proc_macro2::TokenTree::Group(g) => {
+                    // 如果是括号包含的内容，我们就要递归处理内部的TokenStream
+                    let new_stream = self.expand(&g.stream(), n);
+                    // 这里需要注意，上一行中g.stream()返回的是Group内部的TokenStream，
+                    // 也就是说不包含括号本身，所以要在下面重新套上一层括号，而且括号的
+                    // 种类要与原来保持一致。 
+                    let mut wrap_in_group = proc_macro2::Group::new(g.delimiter(), new_stream);
+                    wrap_in_group.set_span(g.span());
+                    ret.extend(quote::quote!(#wrap_in_group));
+                }
+                proc_macro2::TokenTree::Ident(i) => {
+                    // 如果是一个Ident，那么看一下是否为要替换的变量标识符，如果是则替换，
+                    // 如果不是则透传。
+                    if i == &self.variable_ident {
+                        // 注意第二关的测试用例中，过程宏期待的是一个Literal，所以为了
+                        // 通过，我们也要产生一个Literal
+                        let new_ident = proc_macro2::Literal::i64_unsuffixed(n as i64);
+                        ret.extend(quote::quote!(#new_ident));
+                    } else {
+                        ret.extend(quote::quote!(#tree_node));
+                    }
+                }
+                _ => {
+                    // 对于其它的元素（也就是Punct和Literal），原封不动透传
+                    ret.extend(quote::quote!(#tree_node));
+                }
+            }
+        }
+        ret
     }
 }
