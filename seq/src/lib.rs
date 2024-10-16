@@ -68,7 +68,8 @@ impl SeqParser {
         
         // 这里为了简单，使用了for循环，实际我想表达的意思是，
         // 这个idx你可以随心所欲的控制，跳着访问，回溯已经访问过的节点等等，都可以
-        for idx in 0..buf.len() {
+        let mut idx = 0;
+        while idx < buf.len() {
             let tree_node = &buf[idx];
             match tree_node {
                 proc_macro2::TokenTree::Group(g) => {
@@ -81,23 +82,46 @@ impl SeqParser {
                     wrap_in_group.set_span(g.span());
                     ret.extend(quote::quote!(#wrap_in_group));
                 }
-                proc_macro2::TokenTree::Ident(i) => {
-                    // 如果是一个Ident，那么看一下是否为要替换的变量标识符，如果是则替换，
-                    // 如果不是则透传。
-                    if i == &self.variable_ident {
-                        // 注意第二关的测试用例中，过程宏期待的是一个Literal，所以为了
-                        // 通过，我们也要产生一个Literal
+                proc_macro2::TokenTree::Ident(prefix) => {
+                    if idx + 2 < buf.len() { // 我们需要向后预读两个TokenTree元素
+                        if let proc_macro2::TokenTree::Punct(p) = &buf[idx + 1] {
+                            // 井号是一个比较少见的符号，
+                            // 我们尽量早一些判断井号是否存在，这样就可以尽快否定掉不匹配的模式
+                            if p.as_char() == '~' { 
+                                if let proc_macro2::TokenTree::Ident(i) = &buf[idx + 2] {
+                                    if i == &self.variable_ident
+                                        && prefix.span().end() == p.span().start() // 校验是否连续，无空格
+                                        && p.span().end() == i.span().start()
+                                    {
+                                        
+                                        let new_ident_litral = format!("{}{}", prefix.to_string(), n);
+                                        let new_ident = proc_macro2::Ident::new(new_ident_litral.as_str(), prefix.span());
+                                        ret.extend(quote::quote!(#new_ident));
+                                        idx += 3; // 我们消耗了3个Token，所以这里要加3
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // 虽然这一关要支持新的模式，可以为了通过前面的关卡，老逻辑也得兼容。
+                    // 写Parser的一个通用技巧：当有多个可能冲突的规则时，优先尝试最长的
+                    // 规则，因为这个规则只需要看一个Token，而上面的规则需要看3个Token，
+                    // 所以这个规则要写在上一个规则的下面，否则就会导致短规则抢占，长规则无法命中。
+                    if prefix == &self.variable_ident {
                         let new_ident = proc_macro2::Literal::i64_unsuffixed(n as i64);
                         ret.extend(quote::quote!(#new_ident));
-                    } else {
-                        ret.extend(quote::quote!(#tree_node));
+                        idx += 1;
+                        continue;
                     }
+                    ret.extend(quote::quote!(#tree_node));
                 }
                 _ => {
                     // 对于其它的元素（也就是Punct和Literal），原封不动透传
                     ret.extend(quote::quote!(#tree_node));
                 }
             }
+            idx+=1;
         }
         ret
     }
