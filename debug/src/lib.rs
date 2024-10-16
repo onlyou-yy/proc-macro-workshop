@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use proc_macro::{TokenStream};
 use quote::quote;
-use syn::{parse_macro_input, parse_quote, visit::{self, Visit}, DeriveInput};
+use syn::{parse_macro_input, parse_quote, visit::{self, Visit}, DeriveInput, LitStr};
 
 #[proc_macro_derive(CustomDebug,attributes(debug))]
 pub fn derive(input: TokenStream) -> TokenStream {
@@ -56,48 +56,57 @@ fn generate_debug_fmt_body(st:&syn::DeriveInput) -> syn::Result<proc_macro2::Tok
 
 fn generate_debug_trait(st:&syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream>{
     let struct_name_ident = &st.ident;
-
     let fmt_body_stream = generate_debug_fmt_body(st)?;
-
-    let fields = get_fields_from_derive_input(st)?;
-    let mut field_type_names:Vec<String> = Vec::new();
-    let mut phantomdata_type_param_names:Vec<String> = Vec::new();
-    for field in fields {
-        if let Some(s) = get_field_type_name(field)? {
-            field_type_names.push(s);
-        }
-        if let Some(s) = get_phantomdata_generic_type_name(field)?{
-            phantomdata_type_param_names.push(s);
-        }
-    }
-    
-    //找到关联类型信息
-    let associated_types_map = get_generic_associated_types(st);
-    // 取出范型定义，然后为每个范型追加 Debug 约束，之后重新插入到语法树中
     let mut generic_param_to_modify = st.generics.clone();
-    for g in generic_param_to_modify.params.iter_mut() {
-        if let syn::GenericParam::Type(t) = g{
-            let type_param_name = t.ident.to_string();
-            // 如果是PhantomData，就不要对泛型参数`T`本身再添加约束了,除非`T`本身也被直接使用了
-            if phantomdata_type_param_names.contains(&type_param_name) && !field_type_names.contains(&type_param_name) {
-                continue;
-            }
 
-            // 如果是关联类型，就不要对泛型参数`T`本身再添加约束了,除非`T`本身也被直接使用了
-            if associated_types_map.contains_key(&type_param_name) && !field_type_names.contains(&type_param_name) {
-                continue;
+    if let Some(hatch) = get_struct_escape_hatch(st) {
+        generic_param_to_modify.make_where_clause();
+        generic_param_to_modify
+                    .where_clause
+                    .as_mut()
+                    .unwrap()
+                    .predicates
+                    .push(syn::parse_str(hatch.as_str()).unwrap());
+    }else {
+        let fields = get_fields_from_derive_input(st)?;
+        let mut field_type_names:Vec<String> = Vec::new();
+        let mut phantomdata_type_param_names:Vec<String> = Vec::new();
+        for field in fields {
+            if let Some(s) = get_field_type_name(field)? {
+                field_type_names.push(s);
             }
-
-            // parse_quote! 将数据解析为语法树节点
-            t.bounds.push(parse_quote!(std::fmt::Debug));
+            if let Some(s) = get_phantomdata_generic_type_name(field)?{
+                phantomdata_type_param_names.push(s);
+            }
         }
-    }
+        
+        //找到关联类型信息
+        let associated_types_map = get_generic_associated_types(st);
+        // 取出范型定义，然后为每个范型追加 Debug 约束，之后重新插入到语法树中
+        for g in generic_param_to_modify.params.iter_mut() {
+            if let syn::GenericParam::Type(t) = g{
+                let type_param_name = t.ident.to_string();
+                // 如果是PhantomData，就不要对泛型参数`T`本身再添加约束了,除非`T`本身也被直接使用了
+                if phantomdata_type_param_names.contains(&type_param_name) && !field_type_names.contains(&type_param_name) {
+                    continue;
+                }
 
-    // 关联类型的约束要放到where子句里
-    generic_param_to_modify.make_where_clause();
-    for (_, associated_types) in associated_types_map {
-        for associated_type in associated_types {
-            generic_param_to_modify.where_clause.as_mut().unwrap().predicates.push(parse_quote!(#associated_type:std::fmt::Debug));
+                // 如果是关联类型，就不要对泛型参数`T`本身再添加约束了,除非`T`本身也被直接使用了
+                if associated_types_map.contains_key(&type_param_name) && !field_type_names.contains(&type_param_name) {
+                    continue;
+                }
+
+                // parse_quote! 将数据解析为语法树节点
+                t.bounds.push(parse_quote!(std::fmt::Debug));
+            }
+        }
+
+        // 关联类型的约束要放到where子句里
+        generic_param_to_modify.make_where_clause();
+        for (_, associated_types) in associated_types_map {
+            for associated_type in associated_types {
+                generic_param_to_modify.where_clause.as_mut().unwrap().predicates.push(parse_quote!(#associated_type:std::fmt::Debug));
+            }
         }
     }
 
@@ -174,6 +183,24 @@ fn get_generic_associated_types(st:&syn::DeriveInput) -> HashMap<String,Vec<syn:
     visitor.visit_derive_input(st);
     return  visitor.associated_types;
 
+}
+
+fn get_struct_escape_hatch(st: &syn::DeriveInput) -> Option<String> {
+    if let Some(inert_attr) = st.attrs.last() {
+        if inert_attr.path().is_ident("debug") {
+            let mut lit= None;
+            let _ret = inert_attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("bound") {
+                    let value = meta.value()?;
+                    let s:LitStr = value.parse()?;
+                    lit = Some(s.value());
+                }
+                Ok(())
+            });
+            return lit;
+        }
+    }
+    None
 }
 
 fn do_expand(st:&syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
