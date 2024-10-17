@@ -105,7 +105,8 @@ impl syn::visit_mut::VisitMut for MatchVisitor {
         // 删除掉编译器不支持的写在match语句块上面的属性标签
         i.attrs.remove(target_idx as usize);
 
-        let mut match_arm_names = Vec::new();
+        // 显示指定trait object的类型
+        let mut match_arm_names: Vec<(_, &dyn ToTokens)> = Vec::new();
 
         for arm in &i.arms {
             // 要处理三种匹配模式，测试用例07告诉我们对于不支持的模式需要抛出异常
@@ -118,6 +119,13 @@ impl syn::visit_mut::VisitMut for MatchVisitor {
                 },
                 syn::Pat::Struct(p) => {
                     match_arm_names.push((get_path_string(&p.path),&p.path))
+                },
+                // 下面新增两种匹配模式的处理
+                syn::Pat::Ident(p) => {
+                    match_arm_names.push((p.ident.to_string(), &p.ident));
+                },
+                syn::Pat::Wild(p) => {
+                    match_arm_names.push(("_".to_string(), &p.underscore_token));
                 },
                 _ => {
                     self.err = Some(syn::Error::new_spanned(&arm.pat, "unsupported by #[sorted]"));
