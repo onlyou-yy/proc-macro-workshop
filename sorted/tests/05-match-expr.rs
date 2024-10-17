@@ -78,11 +78,11 @@ pub enum Error {
 }
 
 impl Display for Error {
-    #[sorted::check]
+    #[sorted::check]  // 这里是过程宏的调用
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use self::Error::*;
 
-        #[sorted]
+        #[sorted] // 这一行会被外面的过程宏去掉，在这里就是一个标记，最终编译器看不到这个标签
         match self {
             Io(e) => write!(f, "{}", e),
             Fmt(e) => write!(f, "{}", e),

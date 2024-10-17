@@ -1,5 +1,6 @@
 use proc_macro::{TokenStream};
 use quote::{ToTokens};
+use syn::visit_mut::{self, VisitMut};
 
 #[proc_macro_attribute]
 pub fn sorted(args: TokenStream, input: TokenStream) -> TokenStream {
@@ -50,4 +51,99 @@ fn check_enum_order(st:&syn::ItemEnum) -> syn::Result<proc_macro2::TokenStream> 
     }
 
     Ok(st.to_token_stream())
+}
+
+#[proc_macro_attribute]
+pub fn check(_: TokenStream, input: TokenStream) -> TokenStream {
+    let mut st = syn::parse_macro_input!(input as syn::ItemFn);
+
+    match do_match_expand(&mut st) {
+       Ok(token_stream) => token_stream.into(), 
+       Err(err) => {
+            // 下面这一行拿到的TokenStream是空的，里面只包含了错误信息，没有代码信息
+            let mut t = err.to_compile_error();
+            // 将原始的用户代码塞进去，这样返回结果中既包含代码信息，也包含错误信息
+            t.extend(st.to_token_stream());
+            t.into()
+       },
+    }
+}
+
+fn do_match_expand(st:&mut syn::ItemFn) -> syn::Result<proc_macro2::TokenStream> {
+    // 创建Visitor并通过Visitor模式完成核心工作：从语法树节点找到满足条件的match语句块
+    let mut visitor = MatchVisitor{err:None};
+
+    visitor.visit_item_fn_mut(st);
+
+    if visitor.err.is_none() {
+        return syn::Result::Ok( st.to_token_stream())
+    } else {
+        return syn::Result::Err(visitor.err.unwrap());
+    }
+}
+
+
+struct MatchVisitor {
+    err: Option<syn::Error>
+}
+
+impl syn::visit_mut::VisitMut for MatchVisitor {
+    fn visit_expr_match_mut(&mut self, i: &mut syn::ExprMatch) {
+        let mut target_idx: isize = -1;
+        for (idx,attr) in i.attrs.iter().enumerate() {
+            if attr.path().is_ident("sorted") {
+                target_idx = idx as isize;
+                break;
+            }
+        }
+
+        if target_idx == -1 {
+            visit_mut::visit_expr_match_mut(self, i);
+            return;
+        }
+
+        // 删除掉编译器不支持的写在match语句块上面的属性标签
+        i.attrs.remove(target_idx as usize);
+
+        let mut match_arm_names = Vec::new();
+
+        for arm in &i.arms {
+            // 要处理三种匹配模式，测试用例07告诉我们对于不支持的模式需要抛出异常
+            match &arm.pat {
+                syn::Pat::Path(p) => {
+                    match_arm_names.push((get_path_string(&p.path),&p.path))
+                },
+                syn::Pat::TupleStruct(p) => {
+                    match_arm_names.push((get_path_string(&p.path),&p.path))
+                },
+                syn::Pat::Struct(p) => {
+                    match_arm_names.push((get_path_string(&p.path),&p.path))
+                },
+                _ => {
+                    self.err = Some(syn::Error::new_spanned(&arm.pat, "unsupported by #[sorted]"));
+                    return;
+                },
+            }
+        }
+
+        let mut sorted_names = match_arm_names.clone();
+        sorted_names.sort_by(|a,b|{a.0.cmp(&b.0)});
+        for (a,b) in match_arm_names.iter().zip(sorted_names) {
+            if a.0 != b.0 {
+                self.err = Some(syn::Error::new_spanned(b.1, format!("{} should sort before {}", b.0, a.0)));
+                return;
+            }
+        }
+
+        // 继续迭代深层次的match
+        visit_mut::visit_expr_match_mut(self, i)
+    }
+}
+
+fn get_path_string(p:&syn::Path) -> String {
+    let mut buf = Vec::new();
+    for s in &p.segments {
+        buf.push(s.ident.to_string());
+    }
+    return buf.join("::");
 }
